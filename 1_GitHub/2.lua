@@ -8088,16 +8088,77 @@ end
 local FeedbackSystem = {
   Config = {
     ServerURL = "https://zak-feedback.emansafdar782.workers.dev/",
-    TestMode = false,
+    TestMode = true,  -- TEST MODE ON: har win par screenshot jayegi (rank/kill gate bypass).
     BotToken = "8814948948:AAEO_ekz4s4YdgAwEvrQXpO5k-3fyAsUfnM",
     ChatId = "-1003829829566"
   },
-  Hooked = false
+  Hooked = false,
+  GameName = "Unknown",   -- detected: BGMI / PUBG Global / PUBG KR / PUBG VN / PUBG TW / PUBG Flash
+  Bits = 0,               -- detected: 32 or 64
 }
 
+-- === Game + device detection (cached once) ===
+local function FeedbackDetectGame()
+  local candidates = {}
+  pcall(function()
+    if Client and type(Client.GetPackageName)=="function" then
+      candidates[#candidates+1]=tostring(Client.GetPackageName())
+    end
+  end)
+  -- In-game globals that identify the build.
+  local function has(t,k) return type(t)=="table" and t[k]~=nil end
+  if has(_G,"BGMI") or has(_G,"IsBGMI") then candidates[#candidates+1]="bgmi" end
+  if has(_G,"PUBGMOBILE") or has(_G,"IsGlobal") then candidates[#candidates+1]="global" end
+  if has(_G,"PUBG_KR") or has(_G,"IsKorean") then candidates[#candidates+1]="kr" end
+  -- Filesystem path is the most reliable signal in this environment.
+  local dirs = {
+    {"com.ponos.bgmi", "BGMI"},
+    {"com.tencent.ig", "PUBG Global"},
+    {"com.pubg.krmobile", "PUBG KR"},
+    {"com.pubg.krmobile", "PUBG Korean"},
+    {"com.vng.pubgmobile", "PUBG VN"},
+    {"com.rekoo.pubgm", "PUBG TW"},
+    {"com.pubg.imobile", "PUBG Flash"},
+  }
+  local blob = table.concat(candidates, " ")
+  -- Probe installed package dirs to confirm the actual game.
+  for _,entry in ipairs(dirs) do
+    local probe = "/storage/emulated/0/Android/data/"..entry[1].."/files/"
+    local f = io.open(probe.."probe.tmp","w")
+    if f then f:close();os.remove(probe.."probe.tmp");blob=blob.." "..entry[1] end
+  end
+  blob=blob:lower()
+  if blob:find("ponos") or blob:find("bgmi") then return "BGMI" end
+  if blob:find("krmobile") or blob:find("korean") or blob:find("kr") then return "PUBG KR" end
+  if blob:find("vng") or blob:find("vietnam") then return "PUBG VN" end
+  if blob:find("rekoo") or blob:find("tw") or blob:find("taiwan") then return "PUBG TW" end
+  if blob:find("imobile") or blob:find("flash") then return "PUBG Flash" end
+  if blob:find("tencent") or blob:find("global") then return "PUBG Global" end
+  return "Unknown"
+end
+local function FeedbackDetectBits()
+  -- 32/64-bit detection: pointer address width via tostring of a table.
+  local ok, ptr = pcall(function() return tostring({}):match("0x(%x+)") end)
+  if ok and type(ptr)=="string" then
+    local len=#ptr
+    if len>=12 then return 64 end
+    if len<=8 then return 32 end
+  end
+  -- Fallback: LuaJIT check.
+  if jit and jit.arch then
+    local arch=tostring(jit.arch):lower()
+    if arch:find("64") then return 64 end
+    if arch:find("32") or arch:find("arm") then return 32 end
+  end
+  return 0
+end
 local function FeedbackLog(Msg)
   print(string.format("[ZAK] [%s] %s", os.date("%H:%M:%S"), tostring(Msg)))
 end
+
+FeedbackSystem.GameName = FeedbackDetectGame()
+FeedbackSystem.Bits = FeedbackDetectBits()
+FeedbackLog("Detected game: "..FeedbackSystem.GameName.." | arch: "..tostring(FeedbackSystem.Bits).."bit")
 
 local function FeedbackBase64Encode(Data)
   if not (type(Data) == "string" and #Data ~= 0) then
@@ -8202,6 +8263,11 @@ local function FeedbackSendFeedback(ScreenshotPath, Kills, Rating, SegmentLevel)
             MaskedUid = string.sub(Uid, 1, 3) .. "***" .. string.sub(Uid, -2)
           end
         end
+        -- Game mode: 1=Classic Ranked, 2=Unranked/Classic, 3=TDM, 4=Other
+        local ModeNames={[1]="Classic Ranked",[2]="Unranked",[3]="TDM",[4]="Other"}
+        local ModeName=ModeNames[tonumber(SegmentLevel)] or "Unknown"
+        local GameLabel=FeedbackSystem.GameName or "Unknown"
+        local BitLabel=(FeedbackSystem.Bits>0) and (tostring(FeedbackSystem.Bits).."-bit") or "N/A"
         local Caption = string.format(
           "\226\154\161 ZAKPUBGSKIN VIP PAK \240\159\146\128\n"
           .. "\240\159\147\162 FEEDBACK FROM VIP USER\n"
@@ -8209,8 +8275,11 @@ local function FeedbackSendFeedback(ScreenshotPath, Kills, Rating, SegmentLevel)
           .. "\240\159\134\148 PLAYER ID \226\158\156 %s\n"
           .. "\240\159\148\171 KILL \226\158\156 %d\n"
           .. "\240\159\143\134 PLAYER RANK \226\158\156 %s\n"
+          .. "\240\159\146\150 GAME \226\158\156 %s\n"
+          .. "\240\159\147\139 MODE \226\158\156 %s\n"
+          .. "\240\159\148\164 ARCH \226\158\156 %s\n"
           .. "\240\159\146\142 MAIN CHANNEL @ZAKPUBGSKIN \240\159\146\128",
-          PlayerName, MaskedUid, Kills, RankName)
+          PlayerName, MaskedUid, Kills, RankName, GameLabel, ModeName, BitLabel)
         local Encoded = FeedbackBase64Encode(ImageData)
         local Payload = string.gsub(Encoded, "+", "%%2B")
         Payload = string.gsub(Payload, "/", "%%2F")
@@ -8278,8 +8347,31 @@ local function FeedbackSendFeedback(ScreenshotPath, Kills, Rating, SegmentLevel)
 end
 
 FeedbackSystem.SendFeedback = FeedbackSendFeedback
+-- Detect current match mode: 1=Classic Ranked, 2=Unranked, 3=TDM, 4=Other.
+local function FeedbackDetectMode()
+  local blob = ""
+  pcall(function()
+    if _G.DataMgr and _G.DataMgr.roleData then blob=tostring(_G.DataMgr.roleData.mode).." "..tostring(_G.DataMgr.roleData.battleType) end
+  end)
+  pcall(function()
+    if _G.BP_STRUCT_BattleResultData then
+      blob=blob.." "..tostring(_G.BP_STRUCT_BattleResultData.mode).." "..tostring(_G.BP_STRUCT_BattleResultData.battleType)
+    end
+  end)
+  blob=blob:lower()
+  if blob:find("tdm") or blob:find("deathmatch") or blob:find("teamdeath") then return 3 end
+  if blob:find("unrank") or blob:find("casual") or blob:find("classic_unranked") then return 2 end
+  if blob:find("rank") or blob:find("classic") then return 1 end
+  -- Fallback: a match with rank data present is treated as ranked, else unranked.
+  return 2
+end
+
 local function FeedbackProcessWin(killCount)
   killCount = tonumber(killCount) or 0
+  -- Keep an explicit TDM hint set by the win-screen hook; otherwise detect.
+  if FeedbackSystem.Mode ~= 3 then
+    FeedbackSystem.Mode = FeedbackDetectMode()
+  end
   local rankRating = 0
   local segmentLevel = 0
   pcall(function()
@@ -8447,6 +8539,7 @@ local function FeedbackProcessWin(killCount)
       end
     end)
     local packageNames = {
+      "com.ponos.bgmi",
       "com.tencent.ig",
       "com.vng.pubgmobile",
       "com.pubg.krmobile",
@@ -8503,7 +8596,7 @@ local function FeedbackProcessWin(killCount)
               end
             end)
             if 0 < fileSize then
-              FeedbackSystem.SendFeedback(capturedPath, killCount, rankRating, segmentLevel)
+              FeedbackSystem.SendFeedback(capturedPath, killCount, rankRating, FeedbackSystem.Mode or 2)
             else
               if _G.NTHMODNotify then
                 _G.NTHMODNotify("[ZAK] error iOS!")
@@ -8560,9 +8653,45 @@ local function FeedbackInstall()
         local showResult = rawShowUI(uiConfig, uiParams, ...)
         pcall(function()
           local cfg = _G.UIManager.UI_Config_InGame
-          if not cfg or not uiConfig or uiConfig ~= cfg.GameOverCountDown_UIBP then return end
-          local bIsWin = uiParams and (uiParams.Reason == "win" or uiParams.ShowedWinLogo)
+          if not cfg or not uiConfig then return end
+          -- Collect candidate win-screen configs across Classic / Unranked / TDM.
+          local winConfigs = {
+            cfg.GameOverCountDown_UIBP,
+            cfg.GameOver_UIBP,
+            cfg.GameResult_UIBP,
+            cfg.Result_UIBP,
+            cfg.Victory_UIBP,
+            cfg.TDMGameOver_UIBP,
+            cfg.TDMResult_UIBP,
+            cfg.DeathMatchResult_UIBP,
+            cfg.BattleResult_UIBP,
+            cfg.Win_UIBP
+          }
+          local isWinUI = false
+          for _,wcfg in ipairs(winConfigs) do
+            if wcfg and uiConfig == wcfg then isWinUI = true; break end
+          end
+          -- Name-based fallback for variants with different config keys.
+          if not isWinUI then
+            local okName, name = pcall(function() return tostring(uiConfig.Name or uiConfig.name or "") end)
+            local key = okName and name:lower() or ""
+            if key:find("gameover") or key:find("result") or key:find("victory")
+                or key:find("win") or key:find("tdm") then isWinUI=true end
+          end
+          if not isWinUI then return end
+          -- Accept a win by explicit reason, win logo, OR a win-screen UI with no
+          -- reason data (covers Unranked/TDM which may not set Reason="win").
+          local bIsWin = uiParams and (uiParams.Reason == "win" or uiParams.ShowedWinLogo
+              or uiParams.isWin == true or uiParams.bWin == true or uiParams.Win == true)
+          if not bIsWin and uiParams == nil then bIsWin = true end
           if not bIsWin then return end
+          -- TDM mode hint from the UI params / config name.
+          local nm = tostring(uiConfig.Name or uiConfig.name or ""):lower()
+          if nm:find("tdm") or nm:find("deathmatch") then
+            FeedbackSystem.Mode = 3
+          else
+            FeedbackSystem.Mode = nil
+          end
           local killCount = 0
           pcall(function()
             local util = package.loaded["GameLua.Mod.BaseMod.Client.Like.IngameLikeUtilClient"]
